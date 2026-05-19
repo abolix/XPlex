@@ -1,0 +1,6 @@
+{
+	"server": {
+		"listen": "7000",
+		"handshakeTimeout": "10s"
+	}
+}

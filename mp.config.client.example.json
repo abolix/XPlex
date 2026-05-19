@@ -1,0 +1,12 @@
+{
+	"client": {
+		"listen": "2080",
+		"server": "vps.example.com:7000",
+		"xrayLinks": "xrays.txt",
+		"xrayBasePort": 1080,
+		"configsDir": "configs",
+		"probeInterval": "30s",
+		"probeTimeout": "10s",
+		"handshakeTimeout": "10s"
+	}
+}

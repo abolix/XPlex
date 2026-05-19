@@ -1,0 +1,32 @@
+# Build artifacts
+/dist/
+*.exe
+mp
+loadtest
+
+# Generated xray configs (regenerated on every run from xrays.txt)
+/configs/
+
+# Local secrets — share-link list contains UUIDs, passwords, server IPs
+xrays.txt
+
+# Local runtime config (keep the *.example.json files committed)
+config.json
+mp.config.json
+!mp.config.*.example.json
+
+# Vendored xray binary + assets (not source-controlled; release artifact)
+/xray-core/
+
+# Go
+*.test
+*.out
+coverage.out
+vendor/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
