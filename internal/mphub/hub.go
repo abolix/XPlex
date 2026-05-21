@@ -1,18 +1,15 @@
-// Package mphub implements the session demux that sits on top of an
-// mppool.Pool.
-//
-// Multiple logical sessions (one per SOCKS5 client connection on the
-// front, or one per upstream-target dial on the server) share the same
-// long-lived tunnel pool. Each session has a 16-byte ID. When a frame
-// arrives on the pool, the hub looks up the session by ID and feeds
-// the frame to it. When a session wants to send, it asks the hub to
-// broadcast through the pool.
+// Package mphub demultiplexes pool inbound frames to per-session
+// inboxes. It also tracks per-tunnel "win counts" — how often each
+// tunnel delivered a (session, seq) frame first — and exposes that
+// data so a controller can re-classify tunnels as Active or Shadow.
 package mphub
 
 import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"xrayrunner/internal/mpdedup"
 	"xrayrunner/internal/mpframe"
@@ -26,36 +23,103 @@ type Hub struct {
 	mu       sync.RWMutex
 	sessions map[mpframe.SessionID]*Session
 
-	// onUnknown is called when a frame arrives for a session ID not
-	// in the registry. The server uses it to spawn a new session for
-	// inbound HELLOs; the client returns false to drop.
 	onUnknown func(f mpframe.Frame) bool
+
+	// Win-tracking. seenKey is a (session, seq) tuple; the map records
+	// the first-arriving tunnel for each key. Stays bounded because we
+	// only retain winning entries for a short window.
+	winMu      sync.Mutex
+	winCount   map[*mppool.Tunnel]int64 // total wins by tunnel
+	frameCount int64                    // total winning frames
+	seen       map[seenKey]struct{}     // (session, seq) keys we've already credited
+	// We use a ring of seen-keys so the map doesn't grow unbounded.
+	seenRing []seenKey
+	seenIdx  int
 
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
+type seenKey struct {
+	id  mpframe.SessionID
+	seq uint64
+}
+
+const seenRingSize = 8192 // ~remembers last 8k keys; plenty for win tracking
+
 // New returns a Hub that runs its dispatch loop until ctx is cancelled
 // or pool.Inbound is closed.
-//
-// onUnknown handles frames whose session ID is not yet registered. On
-// the server side this is where a new HELLO is detected and a new
-// session goroutine is spawned. Returning false drops the frame.
 func New(parent context.Context, pool *mppool.Pool, onUnknown func(f mpframe.Frame) bool) *Hub {
 	ctx, cancel := context.WithCancel(parent)
 	h := &Hub{
 		pool:      pool,
 		sessions:  make(map[mpframe.SessionID]*Session),
 		onUnknown: onUnknown,
+		winCount:  make(map[*mppool.Tunnel]int64),
+		seen:      make(map[seenKey]struct{}, seenRingSize),
+		seenRing:  make([]seenKey, seenRingSize),
 		cancel:    cancel,
 		done:      make(chan struct{}),
 	}
 	go h.dispatchLoop(ctx)
+	go h.livenessLoop(ctx)
 	return h
 }
 
-// Close stops the dispatch loop. The pool is NOT closed (the caller
-// owns it).
+// livenessLoop watches the pool's live tunnel count. If the pool stays
+// at zero live tunnels for longer than the kill grace period (the
+// server is down or every xray died), every open session is closed so
+// the application layer sees EOF and can reconnect.
+//
+// As soon as a tunnel comes back up, sessions can resume opening from
+// scratch. We don't try to migrate existing sessions across server
+// restarts because the server's session table is gone.
+func (h *Hub) livenessLoop(ctx context.Context) {
+	const (
+		checkInterval = 1 * time.Second
+		killAfter     = 5 * time.Second
+	)
+	t := time.NewTicker(checkInterval)
+	defer t.Stop()
+	deadSince := time.Time{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if h.pool.LiveCount() > 0 {
+				deadSince = time.Time{}
+				continue
+			}
+			if deadSince.IsZero() {
+				deadSince = time.Now()
+				continue
+			}
+			if time.Since(deadSince) >= killAfter {
+				h.killAllSessions("no live tunnels")
+				deadSince = time.Time{} // wait for tunnels to recover
+			}
+		}
+	}
+}
+
+// killAllSessions closes every registered session. Called when the
+// pool has been completely dead long enough that we've decided to
+// surface the failure to applications.
+func (h *Hub) killAllSessions(reason string) {
+	h.mu.Lock()
+	victims := make([]*Session, 0, len(h.sessions))
+	for _, s := range h.sessions {
+		victims = append(victims, s)
+	}
+	h.mu.Unlock()
+	for _, s := range victims {
+		fmt.Printf("session %x: killed (%s)\n", s.id[:], reason)
+		s.markClosed()
+	}
+}
+
+// Close stops the dispatch loop. Pool ownership is unchanged.
 func (h *Hub) Close() {
 	h.cancel()
 	<-h.done
@@ -70,8 +134,7 @@ func (h *Hub) Close() {
 // Pool returns the underlying tunnel pool.
 func (h *Hub) Pool() *mppool.Pool { return h.pool }
 
-// Register attaches s to the hub under its ID. Returns false if the ID
-// is already registered.
+// Register attaches s to the hub.
 func (h *Hub) Register(s *Session) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -82,8 +145,7 @@ func (h *Hub) Register(s *Session) bool {
 	return true
 }
 
-// Unregister removes s from the hub. Late-arriving frames will be
-// passed to onUnknown.
+// Unregister removes s from the hub.
 func (h *Hub) Unregister(s *Session) {
 	h.mu.Lock()
 	if cur := h.sessions[s.id]; cur == s {
@@ -99,49 +161,96 @@ func (h *Hub) Get(id mpframe.SessionID) *Session {
 	return h.sessions[id]
 }
 
-// Broadcast sends f through every live tunnel in the pool. Returns
-// the number that accepted it.
-func (h *Hub) Broadcast(f mpframe.Frame) int {
-	return h.pool.Broadcast(f)
+// Broadcast sends f through every Active tunnel.
+func (h *Hub) Broadcast(f mpframe.Frame) int { return h.pool.Broadcast(f) }
+
+// BroadcastAlways sends f through every live tunnel ignoring state.
+// Used for control frames (HELLO/ACK/CLOSE).
+func (h *Hub) BroadcastAlways(f mpframe.Frame) int { return h.pool.BroadcastAlways(f) }
+
+// WinStats reports total winning frames seen and per-tunnel wins
+// since the last Reset. The returned map is a copy.
+func (h *Hub) WinStats() (totalFrames int64, perTunnel map[*mppool.Tunnel]int64) {
+	h.winMu.Lock()
+	defer h.winMu.Unlock()
+	cp := make(map[*mppool.Tunnel]int64, len(h.winCount))
+	for k, v := range h.winCount {
+		cp[k] = v
+	}
+	return h.frameCount, cp
+}
+
+// ResetWinStats clears all win counters. Called by the controller at
+// the end of each evaluation window.
+func (h *Hub) ResetWinStats() {
+	h.winMu.Lock()
+	h.winCount = make(map[*mppool.Tunnel]int64)
+	h.frameCount = 0
+	for i := range h.seenRing {
+		h.seenRing[i] = seenKey{}
+	}
+	h.seenIdx = 0
+	h.seen = make(map[seenKey]struct{}, seenRingSize)
+	h.winMu.Unlock()
 }
 
 func (h *Hub) dispatchLoop(ctx context.Context) {
 	defer close(h.done)
-	in := h.pool.Inbound()
+	in := h.pool.InboundWithSrc()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case f, ok := <-in:
+		case fs, ok := <-in:
 			if !ok {
 				return
 			}
-			h.deliver(f)
+			h.deliver(fs)
 		}
 	}
 }
 
-func (h *Hub) deliver(f mpframe.Frame) {
+func (h *Hub) deliver(fs mppool.FrameWithSrc) {
+	// Credit the source tunnel for a "win" if this is the first time
+	// we've seen this (session, seq) key. Only DATA frames count —
+	// HELLO/ACK/CLOSE are control and don't reflect duplication
+	// goodness.
+	if fs.Frame.Type == mpframe.TypeData && fs.Src != nil {
+		h.creditWin(fs.Frame.Session, fs.Frame.Seq, fs.Src)
+	}
+
 	h.mu.RLock()
-	s := h.sessions[f.Session]
+	s := h.sessions[fs.Frame.Session]
 	h.mu.RUnlock()
 	if s != nil {
-		s.feed(f)
+		s.feed(fs.Frame)
 		return
 	}
 	if h.onUnknown != nil {
-		if h.onUnknown(f) {
-			// onUnknown handled it (registered a new session). Re-drop:
-			// the frame may now route to that new session if the
-			// registration completed before we returned.
-			return
-		}
+		_ = h.onUnknown(fs.Frame)
 	}
-	// Otherwise drop: late frame for a closed/unknown session.
 }
 
-// Session is the per-flow state. It owns a dedup buffer for incoming
-// frames and a monotonic seq counter for outgoing.
+func (h *Hub) creditWin(id mpframe.SessionID, seq uint64, t *mppool.Tunnel) {
+	k := seenKey{id: id, seq: seq}
+	h.winMu.Lock()
+	defer h.winMu.Unlock()
+	if _, dup := h.seen[k]; dup {
+		return
+	}
+	// Evict the slot we're about to overwrite.
+	old := h.seenRing[h.seenIdx]
+	if old != (seenKey{}) {
+		delete(h.seen, old)
+	}
+	h.seenRing[h.seenIdx] = k
+	h.seenIdx = (h.seenIdx + 1) % len(h.seenRing)
+	h.seen[k] = struct{}{}
+	h.winCount[t]++
+	h.frameCount++
+}
+
+// Session is the per-flow state.
 type Session struct {
 	id  mpframe.SessionID
 	hub *Hub
@@ -153,17 +262,19 @@ type Session struct {
 	closed  bool
 	inboxCh chan mpframe.Frame
 	doneCh  chan struct{}
+
+	bytesSent atomic.Int64
+	bytesRecv atomic.Int64
 }
 
 // SessionConfig controls a session's resources.
 type SessionConfig struct {
-	StartRx         uint64 // first inbound seqno expected (1 for fresh sessions)
-	DedupCap        int    // out-of-order backlog cap
-	InboxBufferSize int    // pending-to-process frames
+	StartRx         uint64
+	DedupCap        int
+	InboxBufferSize int
 }
 
-// NewSession creates a session bound to hub. The caller is responsible
-// for hub.Register'ing it.
+// NewSession creates a session bound to hub.
 func NewSession(hub *Hub, id mpframe.SessionID, cfg SessionConfig) *Session {
 	if cfg.StartRx == 0 {
 		cfg.StartRx = 1
@@ -183,19 +294,11 @@ func NewSession(hub *Hub, id mpframe.SessionID, cfg SessionConfig) *Session {
 	}
 }
 
-// ID returns the session ID.
-func (s *Session) ID() mpframe.SessionID { return s.id }
-
-// Done is closed when the session is shut down.
-func (s *Session) Done() <-chan struct{} { return s.doneCh }
-
-// Inbox is the channel of frames addressed to this session, in arrival
-// order (NOT delivery order — the consumer must dedup using
-// DeliverData).
+func (s *Session) ID() mpframe.SessionID       { return s.id }
+func (s *Session) Done() <-chan struct{}       { return s.doneCh }
 func (s *Session) Inbox() <-chan mpframe.Frame { return s.inboxCh }
 
-// SendData wraps payload as a DATA frame and broadcasts it through the
-// hub's pool. Returns the assigned seqno.
+// SendData broadcasts a DATA frame across Active tunnels.
 func (s *Session) SendData(payload []byte) (uint64, int) {
 	s.mu.Lock()
 	if s.closed {
@@ -212,11 +315,13 @@ func (s *Session) SendData(payload []byte) (uint64, int) {
 		Seq:     seq,
 		Payload: payload,
 	}
+	s.bytesSent.Add(int64(len(payload)))
 	return seq, s.hub.Broadcast(f)
 }
 
-// SendControl broadcasts a non-data frame (HELLO, HELLO_ACK, CLOSE).
-// These do not consume seqno space — they're tunnel-level signaling.
+// SendControl broadcasts a control frame (HELLO/HELLO_ACK/CLOSE)
+// through all tunnels, including Shadows. These signals must reach
+// the peer regardless of duplication policy.
 func (s *Session) SendControl(typ byte, payload []byte) int {
 	f := mpframe.Frame{
 		Type:    typ,
@@ -224,16 +329,21 @@ func (s *Session) SendControl(typ byte, payload []byte) int {
 		Seq:     0,
 		Payload: payload,
 	}
-	return s.hub.Broadcast(f)
+	return s.hub.BroadcastAlways(f)
 }
 
-// DeliverData feeds a DATA frame into the dedup buffer and returns
-// any newly-deliverable payloads (in order).
+// DeliverData feeds a DATA frame into the dedup buffer.
 func (s *Session) DeliverData(f mpframe.Frame) ([][]byte, error) {
-	return s.dedup.Push(f.Seq, f.Payload)
+	out, err := s.dedup.Push(f.Seq, f.Payload)
+	if err == nil {
+		for _, p := range out {
+			s.bytesRecv.Add(int64(len(p)))
+		}
+	}
+	return out, err
 }
 
-// Close marks the session closed and signals waiters. Idempotent.
+// Close marks the session closed.
 func (s *Session) Close() {
 	s.mu.Lock()
 	if s.closed {
@@ -255,18 +365,11 @@ func (s *Session) markClosed() {
 	s.mu.Unlock()
 }
 
-// feed pushes f onto the inbox; non-blocking on a full buffer (drops
-// the oldest by closing the inbox conservatively isn't quite right, so
-// we just drop the new frame and rely on dedup retransmission via
-// other tunnels).
 func (s *Session) feed(f mpframe.Frame) {
 	select {
 	case s.inboxCh <- f:
 	case <-s.doneCh:
 	default:
-		// Inbox full. Frame dropped; under multipath this is fine
-		// because dedup will pick it up via another tunnel — but in
-		// practice should never happen with default buffer size.
 		fmt.Printf("session %x: inbox full, dropping frame\n", s.id[:])
 	}
 }

@@ -1,6 +1,7 @@
 {
 	"server": {
 		"listen": "7000",
-		"handshakeTimeout": "10s"
+		"handshakeTimeout": "10s",
+		"psk": "PASTE_SAME_HEX_KEY_AS_CLIENT_HERE"
 	}
 }

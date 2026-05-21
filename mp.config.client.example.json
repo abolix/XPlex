@@ -7,6 +7,7 @@
 		"configsDir": "configs",
 		"probeInterval": "30s",
 		"probeTimeout": "10s",
-		"handshakeTimeout": "10s"
+		"handshakeTimeout": "10s",
+		"psk": "PASTE_HEX_KEY_FROM_mp_gen-key_HERE"
 	}
 }

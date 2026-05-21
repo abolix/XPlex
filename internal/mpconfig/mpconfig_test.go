@@ -101,6 +101,7 @@ func TestResolveClient_FileOnly(t *testing.T) {
 		HandshakeTimeout: "5s",
 		ProbeInterval:    "20s",
 		ProbeTimeout:     "3s",
+		PSK:              "0000000000000000000000000000000000000000000000000000000000000000",
 	}, mpconfig.ClientOverrides{})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -133,6 +134,7 @@ func TestResolveClient_FlagsOverrideFile(t *testing.T) {
 		Listen:    "9000",
 		Server:    "fileserver:7000",
 		XrayLinks: "fileLinks.txt",
+		PSK:       "0000000000000000000000000000000000000000000000000000000000000000",
 	}, mpconfig.ClientOverrides{
 		Listen:           "1234",
 		Server:           "flagserver:7000",
@@ -159,6 +161,7 @@ func TestResolveClient_FlagsOverrideFile(t *testing.T) {
 func TestResolveClient_DefaultsApplied(t *testing.T) {
 	cfg, err := mpconfig.ResolveClient(nil, mpconfig.ClientOverrides{
 		Server: "vps:7000",
+		PSK:    "0000000000000000000000000000000000000000000000000000000000000000",
 	})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -207,7 +210,7 @@ func TestResolveServer_FileOnly(t *testing.T) {
 	cfg, err := mpconfig.ResolveServer(&mpconfig.ServerFile{
 		Listen:           "9000",
 		HandshakeTimeout: "15s",
-	}, "", 0)
+	}, "", "0000000000000000000000000000000000000000000000000000000000000000", 0)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -222,7 +225,7 @@ func TestResolveServer_FileOnly(t *testing.T) {
 func TestResolveServer_FlagsOverrideFile(t *testing.T) {
 	cfg, err := mpconfig.ResolveServer(&mpconfig.ServerFile{
 		Listen: "9000",
-	}, "7777", 2*time.Second)
+	}, "7777", "0000000000000000000000000000000000000000000000000000000000000000", 2*time.Second)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -232,7 +235,7 @@ func TestResolveServer_FlagsOverrideFile(t *testing.T) {
 }
 
 func TestResolveServer_DefaultListen(t *testing.T) {
-	cfg, _ := mpconfig.ResolveServer(nil, "", 0)
+	cfg, _ := mpconfig.ResolveServer(nil, "", "0000000000000000000000000000000000000000000000000000000000000000", 0)
 	if cfg.Listen != "0.0.0.0:7000" {
 		t.Errorf("default listen wrong: %v", cfg.Listen)
 	}

@@ -78,6 +78,47 @@ func Write(w io.Writer, f Frame) error {
 	return err
 }
 
+// Marshal returns the wire-bytes of f without writing them. Used by
+// the AEAD path which seals the bytes before writing.
+func Marshal(f Frame) ([]byte, error) {
+	if len(f.Payload) > MaxPayload {
+		return nil, fmt.Errorf("payload too large: %d > %d", len(f.Payload), MaxPayload)
+	}
+	buf := make([]byte, HeaderSize+len(f.Payload))
+	buf[0] = f.Type
+	copy(buf[1:1+SessionIDLen], f.Session[:])
+	binary.BigEndian.PutUint64(buf[1+SessionIDLen:1+SessionIDLen+8], f.Seq)
+	binary.BigEndian.PutUint32(buf[1+SessionIDLen+8:HeaderSize], uint32(len(f.Payload)))
+	copy(buf[HeaderSize:], f.Payload)
+	return buf, nil
+}
+
+// Unmarshal parses a frame from a self-contained byte slice (i.e. the
+// plaintext output of an AEAD Open).
+func Unmarshal(b []byte) (Frame, error) {
+	if len(b) < HeaderSize {
+		return Frame{}, fmt.Errorf("short frame: %d < %d", len(b), HeaderSize)
+	}
+	plen := binary.BigEndian.Uint32(b[1+SessionIDLen+8 : HeaderSize])
+	if plen > MaxPayload {
+		return Frame{}, fmt.Errorf("payload too large: %d > %d", plen, MaxPayload)
+	}
+	if len(b) < HeaderSize+int(plen) {
+		return Frame{}, fmt.Errorf("truncated frame: have %d, need %d",
+			len(b), HeaderSize+int(plen))
+	}
+	f := Frame{
+		Type: b[0],
+		Seq:  binary.BigEndian.Uint64(b[1+SessionIDLen : 1+SessionIDLen+8]),
+	}
+	copy(f.Session[:], b[1:1+SessionIDLen])
+	if plen > 0 {
+		f.Payload = make([]byte, plen)
+		copy(f.Payload, b[HeaderSize:HeaderSize+plen])
+	}
+	return f, nil
+}
+
 // Read decodes a single frame from r. Returns io.EOF if the stream
 // ends cleanly between frames; any other error indicates a broken
 // stream and the caller should close the tunnel.

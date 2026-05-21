@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"xrayrunner/internal/mpcrypto"
 	"xrayrunner/internal/mpframe"
 	"xrayrunner/internal/mphub"
 	"xrayrunner/internal/mppool"
@@ -25,6 +26,8 @@ type Config struct {
 	ListenAddr     string
 	WriteChunkSize int
 	DialTimeout    time.Duration
+	// Codec encrypts/decrypts every wire frame. Required.
+	Codec *mpcrypto.Codec
 }
 
 // Server runs the destination side of the multipath proxy.
@@ -62,7 +65,7 @@ func (s *Server) Run(ctx context.Context) error {
 	defer ln.Close()
 	go func() { <-ctx.Done(); ln.Close() }()
 
-	pool := mppool.New(ctx, mppool.Config{}) // server has no dialers
+	pool := mppool.New(ctx, mppool.Config{Codec: s.cfg.Codec}) // server has no dialers
 	hub := mphub.New(ctx, pool, func(f mpframe.Frame) bool {
 		return s.handleUnknown(ctx, f)
 	})
@@ -252,4 +255,3 @@ func (s *Server) isTomb(id mpframe.SessionID) bool {
 	}
 	return true
 }
-

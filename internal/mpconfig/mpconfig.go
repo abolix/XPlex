@@ -6,6 +6,7 @@
 package mpconfig
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -46,12 +47,17 @@ type ClientFile struct {
 	ProbeTimeout string `json:"probeTimeout,omitempty"`
 	// HandshakeTimeout bounds tunnel HELLO/ACK round-trips. Default 10s.
 	HandshakeTimeout string `json:"handshakeTimeout,omitempty"`
+	// PSK is the 32-byte pre-shared key, hex-encoded. Required.
+	// Generate with `mp gen-key`.
+	PSK string `json:"psk"`
 }
 
 // ServerFile describes the server subcommand's settings.
 type ServerFile struct {
 	Listen           string `json:"listen"`
 	HandshakeTimeout string `json:"handshakeTimeout,omitempty"`
+	// PSK matches the client's. Required.
+	PSK string `json:"psk"`
 }
 
 // ClientConfig is the resolved client configuration.
@@ -65,12 +71,15 @@ type ClientConfig struct {
 	ProbeInterval    time.Duration
 	ProbeTimeout     time.Duration
 	HandshakeTimeout time.Duration
+	// PSK is the 32-byte pre-shared key (raw bytes, decoded from hex).
+	PSK []byte
 }
 
 // ServerConfig is the resolved server configuration.
 type ServerConfig struct {
 	Listen           string
 	HandshakeTimeout time.Duration
+	PSK              []byte
 }
 
 // Load reads a JSON config file. Returns an empty File if path is
@@ -131,6 +140,7 @@ type ClientOverrides struct {
 	HandshakeTimeout time.Duration
 	ProbeInterval    time.Duration
 	ProbeTimeout     time.Duration
+	PSK              string // hex-encoded; overrides file.PSK if non-empty
 }
 
 func ResolveClient(file *ClientFile, ov ClientOverrides) (ClientConfig, error) {
@@ -219,11 +229,22 @@ func ResolveClient(file *ClientFile, ov ClientOverrides) (ClientConfig, error) {
 	if cfg.Server == "" {
 		return cfg, fmt.Errorf("client: server address is required")
 	}
+
+	pskHex := ov.PSK
+	if pskHex == "" && file != nil {
+		pskHex = file.PSK
+	}
+	psk, err := decodePSK(pskHex)
+	if err != nil {
+		return cfg, fmt.Errorf("client.psk: %w", err)
+	}
+	cfg.PSK = psk
+
 	return cfg, nil
 }
 
 // ResolveServer merges file-derived defaults with command-line overrides.
-func ResolveServer(file *ServerFile, listen string, handshakeTO time.Duration) (ServerConfig, error) {
+func ResolveServer(file *ServerFile, listen, pskHex string, handshakeTO time.Duration) (ServerConfig, error) {
 	cfg := ServerConfig{
 		Listen:           listen,
 		HandshakeTimeout: handshakeTO,
@@ -251,5 +272,30 @@ func ResolveServer(file *ServerFile, listen string, handshakeTO time.Duration) (
 		return cfg, fmt.Errorf("server.listen: %w", err)
 	}
 	cfg.Listen = listenNorm
+
+	if pskHex == "" && file != nil {
+		pskHex = file.PSK
+	}
+	psk, err := decodePSK(pskHex)
+	if err != nil {
+		return cfg, fmt.Errorf("server.psk: %w", err)
+	}
+	cfg.PSK = psk
+
 	return cfg, nil
+}
+
+// decodePSK validates and hex-decodes a PSK string. Required field.
+func decodePSK(s string) ([]byte, error) {
+	if s == "" {
+		return nil, fmt.Errorf("required (run `mp gen-key` to create one)")
+	}
+	b, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("invalid hex: %w", err)
+	}
+	if len(b) != 32 {
+		return nil, fmt.Errorf("must decode to 32 bytes, got %d", len(b))
+	}
+	return b, nil
 }
