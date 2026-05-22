@@ -31,12 +31,12 @@ import (
 	"testing"
 	"time"
 
-	"xrayrunner/internal/mpfront"
-	"xrayrunner/internal/mphub"
-	"xrayrunner/internal/mppool"
-	"xrayrunner/internal/mpserver"
-	"xrayrunner/internal/socks5"
-	"xrayrunner/internal/testutil"
+	"xplex/internal/mpfront"
+	"xplex/internal/mphub"
+	"xplex/internal/mppool"
+	"xplex/internal/mpserver"
+	"xplex/internal/socks5"
+	"xplex/internal/testutil"
 )
 
 // startEcho launches a TCP echo server.
@@ -359,3 +359,4 @@ func TestStress_LargePayload(t *testing.T) {
 		t.Fatal("1 MiB round-trip failed")
 	}
 }
+

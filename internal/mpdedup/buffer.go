@@ -89,3 +89,4 @@ func (b *Buffer) Pending() int {
 	defer b.mu.Unlock()
 	return len(b.pending)
 }
+

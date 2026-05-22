@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"xrayrunner/internal/socks5"
-	"xrayrunner/internal/testutil"
+	"xplex/internal/socks5"
+	"xplex/internal/testutil"
 )
 
 func TestDial_Echo(t *testing.T) {
@@ -165,3 +165,4 @@ func TestDial_LongHostnameRejected(t *testing.T) {
 		t.Fatal("expected error for >255 char hostname")
 	}
 }
+

@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"xrayrunner/internal/mpdedup"
-	"xrayrunner/internal/mpframe"
-	"xrayrunner/internal/mppool"
+	"xplex/internal/mpdedup"
+	"xplex/internal/mpframe"
+	"xplex/internal/mppool"
 )
 
 // Hub demultiplexes frames from a shared pool to per-session inboxes.
@@ -77,7 +77,7 @@ func New(parent context.Context, pool *mppool.Pool, onUnknown func(f mpframe.Fra
 func (h *Hub) livenessLoop(ctx context.Context) {
 	const (
 		checkInterval = 1 * time.Second
-		killAfter     = 5 * time.Second
+		killAfter     = 30 * time.Second // longer grace for mining sessions to survive reconnects
 	)
 	t := time.NewTicker(checkInterval)
 	defer t.Stop()
@@ -134,6 +134,12 @@ func (h *Hub) Close() {
 // Pool returns the underlying tunnel pool.
 func (h *Hub) Pool() *mppool.Pool { return h.pool }
 
+// TestFeed injects a frame directly into the hub's dispatch path.
+// Only for use in tests.
+func (h *Hub) TestFeed(f mpframe.Frame) {
+	h.deliver(mppool.FrameWithSrc{Frame: f, Src: nil})
+}
+
 // Register attaches s to the hub.
 func (h *Hub) Register(s *Session) bool {
 	h.mu.Lock()
@@ -181,7 +187,8 @@ func (h *Hub) WinStats() (totalFrames int64, perTunnel map[*mppool.Tunnel]int64)
 }
 
 // ResetWinStats clears all win counters. Called by the controller at
-// the end of each evaluation window.
+// the end of each evaluation window. Also purges entries for dead
+// tunnels to prevent slow memory leaks (#3 fix).
 func (h *Hub) ResetWinStats() {
 	h.winMu.Lock()
 	h.winCount = make(map[*mppool.Tunnel]int64)
@@ -263,6 +270,12 @@ type Session struct {
 	inboxCh chan mpframe.Frame
 	doneCh  chan struct{}
 
+	// Pre-dedup filter: tracks which seq numbers have already been
+	// enqueued into inboxCh, so duplicate copies from other tunnels
+	// are dropped before they consume inbox slots.
+	feedMu   sync.Mutex
+	feedSeen map[uint64]struct{}
+
 	bytesSent atomic.Int64
 	bytesRecv atomic.Int64
 }
@@ -286,11 +299,12 @@ func NewSession(hub *Hub, id mpframe.SessionID, cfg SessionConfig) *Session {
 		cfg.InboxBufferSize = 256
 	}
 	return &Session{
-		id:      id,
-		hub:     hub,
-		dedup:   mpdedup.New(cfg.StartRx, cfg.DedupCap),
-		inboxCh: make(chan mpframe.Frame, cfg.InboxBufferSize),
-		doneCh:  make(chan struct{}),
+		id:       id,
+		hub:      hub,
+		dedup:    mpdedup.New(cfg.StartRx, cfg.DedupCap),
+		inboxCh:  make(chan mpframe.Frame, cfg.InboxBufferSize),
+		doneCh:   make(chan struct{}),
+		feedSeen: make(map[uint64]struct{}, 256),
 	}
 }
 
@@ -298,7 +312,10 @@ func (s *Session) ID() mpframe.SessionID       { return s.id }
 func (s *Session) Done() <-chan struct{}       { return s.doneCh }
 func (s *Session) Inbox() <-chan mpframe.Frame { return s.inboxCh }
 
-// SendData broadcasts a DATA frame across Active tunnels.
+// SendData broadcasts a DATA frame across Active tunnels. If no tunnel
+// accepts the frame (all down), retries with backoff until at least one
+// tunnel delivers it or the session is closed. This prevents data loss
+// during brief tunnel flaps.
 func (s *Session) SendData(payload []byte) (uint64, int) {
 	s.mu.Lock()
 	if s.closed {
@@ -316,7 +333,25 @@ func (s *Session) SendData(payload []byte) (uint64, int) {
 		Payload: payload,
 	}
 	s.bytesSent.Add(int64(len(payload)))
-	return seq, s.hub.Broadcast(f)
+
+	// Retry loop: keep trying until at least one tunnel accepts the frame.
+	// Wait up to 30s to survive tunnel reconnects without losing data.
+	const maxRetries = 300 // 300 * 100ms = 30s max wait
+	for attempt := 0; ; attempt++ {
+		sent := s.hub.Broadcast(f)
+		if sent > 0 {
+			return seq, sent
+		}
+		// No tunnels available. Wait briefly and retry.
+		if attempt >= maxRetries {
+			return seq, 0 // give up after 5s
+		}
+		select {
+		case <-s.doneCh:
+			return seq, 0 // session closed
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // SendControl broadcasts a control frame (HELLO/HELLO_ACK/CLOSE)
@@ -366,10 +401,34 @@ func (s *Session) markClosed() {
 }
 
 func (s *Session) feed(f mpframe.Frame) {
+	// For DATA frames: deduplicate at the inbox gate. Only the first
+	// copy of a given seq number enters the channel. Duplicates from
+	// other tunnels are silently dropped here — never consuming inbox
+	// capacity. This is the real fix for "inbox full" under multipath.
+	if f.Type == mpframe.TypeData && f.Seq > 0 {
+		s.feedMu.Lock()
+		if _, dup := s.feedSeen[f.Seq]; dup {
+			s.feedMu.Unlock()
+			return // duplicate — drop it
+		}
+		s.feedSeen[f.Seq] = struct{}{}
+		// Bound the map: remove entries far below current seq.
+		// Keep a window of 512 to handle mild reordering.
+		if len(s.feedSeen) > 1024 {
+			cutoff := f.Seq - 512
+			for k := range s.feedSeen {
+				if k < cutoff {
+					delete(s.feedSeen, k)
+				}
+			}
+		}
+		s.feedMu.Unlock()
+	}
+
+	// Enqueue. Control frames (HELLO_ACK, CLOSE) always go through.
 	select {
 	case s.inboxCh <- f:
 	case <-s.doneCh:
-	default:
-		fmt.Printf("session %x: inbox full, dropping frame\n", s.id[:])
 	}
 }
+

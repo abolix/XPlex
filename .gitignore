@@ -1,21 +1,22 @@
 # Build artifacts
 /dist/
 *.exe
-mp
+xplex
 loadtest
+bench
 
 # Generated xray configs (regenerated on every run from xrays.txt)
 /configs/
 
-# Local secrets — share-link list contains UUIDs, passwords, server IPs
+# Local secrets
 xrays.txt
-
-# Local runtime config (keep the *.example.json files committed)
 config.json
-mp.config.json
-!mp.config.*.example.json
+prod.log
 
-# Vendored xray binary + assets (not source-controlled; release artifact)
+# Keep example configs committed
+!xplex.config.*.example.json
+
+# Vendored xray binary + assets
 /xray-core/
 
 # Go

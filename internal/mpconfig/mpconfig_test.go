@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"xrayrunner/internal/mpconfig"
+	"xplex/internal/mpconfig"
 )
 
 func writeTemp(t *testing.T, content string) string {
@@ -240,3 +240,4 @@ func TestResolveServer_DefaultListen(t *testing.T) {
 		t.Errorf("default listen wrong: %v", cfg.Listen)
 	}
 }
+

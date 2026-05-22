@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	"xrayrunner/internal/mpadapt"
-	"xrayrunner/internal/mpcrypto"
-	"xrayrunner/internal/mpfront"
-	"xrayrunner/internal/mphub"
-	"xrayrunner/internal/mppool"
-	"xrayrunner/internal/socks5"
+	"xplex/internal/mpadapt"
+	"xplex/internal/mpcrypto"
+	"xplex/internal/mpfront"
+	"xplex/internal/mphub"
+	"xplex/internal/mppool"
+	"xplex/internal/socks5"
 )
 
 func main() {
@@ -122,3 +122,4 @@ func splitHP(addr string) (string, uint16, error) {
 	fmt.Sscanf(p, "%d", &port)
 	return h, uint16(port), nil
 }
+

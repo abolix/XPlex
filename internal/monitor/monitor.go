@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"xrayrunner/internal/probe"
-	"xrayrunner/internal/runner"
-	"xrayrunner/internal/stats"
+	"xplex/internal/probe"
+	"xplex/internal/runner"
+	"xplex/internal/stats"
 )
 
 // Run blocks until ctx is cancelled, probing every interval.
@@ -81,3 +81,4 @@ func probeAll(instances []*runner.Instance, tracker *stats.Tracker, timeout time
 		}
 	}
 }
+

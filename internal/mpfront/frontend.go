@@ -21,8 +21,8 @@ import (
 	"strconv"
 	"time"
 
-	"xrayrunner/internal/mpframe"
-	"xrayrunner/internal/mphub"
+	"xplex/internal/mpframe"
+	"xplex/internal/mphub"
 )
 
 // Config controls the frontend.
@@ -83,10 +83,19 @@ func (f *Frontend) handle(ctx context.Context, client net.Conn) {
 		return
 	}
 
-	// Need at least one live tunnel.
+	// Wait briefly for at least one tunnel instead of instant-reject.
 	if f.hub.Pool().LiveCount() == 0 {
-		_ = writeConnectReply(client, 0x03)
-		return
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if f.hub.Pool().LiveCount() > 0 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if f.hub.Pool().LiveCount() == 0 {
+			_ = writeConnectReply(client, 0x03)
+			return
+		}
 	}
 
 	var sid mpframe.SessionID
@@ -97,13 +106,12 @@ func (f *Frontend) handle(ctx context.Context, client net.Conn) {
 
 	sess := mphub.NewSession(f.hub, sid, mphub.SessionConfig{StartRx: 1})
 	if !f.hub.Register(sess) {
-		// Astronomically unlikely: another session with this ID.
 		_ = writeConnectReply(client, 0x01)
 		return
 	}
 	defer sess.Close()
 
-	// Send HELLO and wait for ACK.
+	// Send HELLO.
 	destPayload, err := mpframe.EncodeDest(target)
 	if err != nil {
 		_ = writeConnectReply(client, 0x01)
@@ -114,11 +122,10 @@ func (f *Frontend) handle(ctx context.Context, client net.Conn) {
 		return
 	}
 
-	if !waitHelloAck(ctx, sess, f.cfg.HelloTimeout) {
-		_ = writeConnectReply(client, 0x04) // host unreachable
-		return
-	}
-
+	// 0-RTT: Tell the SOCKS5 client "connected" immediately and start
+	// pumping data. The server will buffer early DATA frames while it
+	// dials the destination. If dial fails, we'll get HELLO_ACK with
+	// an error and close the session — the client sees a broken pipe.
 	if err := writeConnectReply(client, 0x00); err != nil {
 		return
 	}
@@ -126,25 +133,31 @@ func (f *Frontend) handle(ctx context.Context, client net.Conn) {
 
 	fmt.Printf("session %x: open -> %s\n", sid[:], target)
 
-	// Pump bytes both ways until either end closes.
-	pumpDone := make(chan struct{}, 2)
+	// Start pumps immediately — don't wait for ACK.
+	clientDone := make(chan struct{})
+	hubDone := make(chan struct{})
 	go func() {
 		f.pumpClientToHub(client, sess)
-		pumpDone <- struct{}{}
+		close(clientDone)
 	}()
 	go func() {
 		f.pumpHubToClient(client, sess)
-		pumpDone <- struct{}{}
+		close(hubDone)
 	}()
-	<-pumpDone
 
-	// Tell peer we're done so it can flush.
-	sess.SendControl(mpframe.TypeClose, nil)
-
-	// Drain the second pump briefly so its buffered bytes flush.
 	select {
-	case <-pumpDone:
-	case <-time.After(200 * time.Millisecond):
+	case <-clientDone:
+		sess.SendControl(mpframe.TypeClose, nil)
+		select {
+		case <-hubDone:
+		case <-time.After(5 * time.Second):
+		}
+	case <-hubDone:
+		sess.SendControl(mpframe.TypeClose, nil)
+		select {
+		case <-clientDone:
+		case <-time.After(2 * time.Second):
+		}
 	}
 
 	fmt.Printf("session %x: closed\n", sid[:])
@@ -187,36 +200,16 @@ func (f *Frontend) pumpHubToClient(client net.Conn, sess *mphub.Session) {
 						return
 					}
 				}
+			case mpframe.TypeHelloAck:
+				// 0-RTT: if ACK carries an error, the server couldn't
+				// dial the destination. Close session — client sees RST.
+				if len(fr.Payload) > 0 {
+					return
+				}
+				// Success ACK — ignore, we're already pumping.
 			case mpframe.TypeClose:
 				return
-			default:
-				// HELLO_ACK arrives early (handled by waitHelloAck
-				// before pumps start) — anything else here is
-				// unexpected; ignore.
 			}
-		}
-	}
-}
-
-// waitHelloAck blocks until either a HELLO_ACK arrives on any tunnel
-// or the timeout elapses. Returns true on ack.
-func waitHelloAck(ctx context.Context, sess *mphub.Session, timeout time.Duration) bool {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-deadline.C:
-			return false
-		case fr, ok := <-sess.Inbox():
-			if !ok {
-				return false
-			}
-			if fr.Type == mpframe.TypeHelloAck {
-				return len(fr.Payload) == 0 // empty payload = success
-			}
-			// Other frame types pre-ack are unexpected; drop.
 		}
 	}
 }
@@ -301,3 +294,4 @@ func writeConnectReply(c net.Conn, status byte) error {
 	_, err := c.Write([]byte{0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 	return err
 }
+

@@ -44,3 +44,4 @@ func SelfSignedTLSConfig(t *testing.T) *tls.Config {
 		MinVersion: tls.VersionTLS12,
 	}
 }
+

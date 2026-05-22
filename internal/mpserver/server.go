@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"xrayrunner/internal/mpcrypto"
-	"xrayrunner/internal/mpframe"
-	"xrayrunner/internal/mphub"
-	"xrayrunner/internal/mppool"
+	"xplex/internal/mpcrypto"
+	"xplex/internal/mpframe"
+	"xplex/internal/mphub"
+	"xplex/internal/mppool"
 )
 
 // Config controls the server.
@@ -77,6 +77,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	defer hub.Close()
 	defer pool.Close()
+
+	// #4: Periodic tomb sweep so stale entries don't accumulate.
+	go s.tombSweepLoop(ctx)
 
 	fmt.Printf("mp-server listening on %s\n", s.cfg.ListenAddr)
 
@@ -141,35 +144,115 @@ func (s *Server) runSession(ctx context.Context, sess *mphub.Session, dest strin
 	}
 	defer conn.Close()
 
+	// TCP_NODELAY on outbound connection to destination (mining pool).
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+
+	// 0-RTT: Flush any DATA frames that arrived while we were dialing.
+	// The client starts sending immediately after HELLO without waiting
+	// for ACK, so frames may have accumulated in the inbox.
+	earlyDrained := false
+drainEarly:
+	for !earlyDrained {
+		select {
+		case fr := <-sess.Inbox():
+			switch fr.Type {
+			case mpframe.TypeData:
+				ready, err := sess.DeliverData(fr)
+				if err != nil {
+					_ = s.sendAck(sess.ID(), "dedup error")
+					return
+				}
+				for _, p := range ready {
+					if _, werr := conn.Write(p); werr != nil {
+						return
+					}
+				}
+			case mpframe.TypeClose:
+				return
+			}
+		default:
+			earlyDrained = true
+			break drainEarly
+		}
+	}
+
 	if err := s.sendAck(sess.ID(), ""); err != nil {
 		return
 	}
 	fmt.Printf("session %x: opened -> %s\n", func() []byte { id := sess.ID(); return id[:] }(), dest)
 
-	pumpDone := make(chan struct{}, 2)
-	go func() {
-		s.pumpDestToHub(conn, sess)
-		pumpDone <- struct{}{}
-	}()
-	go func() {
-		s.pumpHubToDest(conn, sess)
-		pumpDone <- struct{}{}
-	}()
-	<-pumpDone
+	// Idle timeout — must be longer than the liveness kill grace (30s)
+	// so sessions survive tunnel reconnects without being reaped.
+	const idleTimeout = 120 * time.Second
+	activity := make(chan struct{}, 1)
 
-	sess.SendControl(mpframe.TypeClose, nil)
+	destDone := make(chan struct{})
+	hubDone := make(chan struct{})
+	go func() {
+		s.pumpDestToHub(conn, sess, activity)
+		close(destDone)
+	}()
+	go func() {
+		s.pumpHubToDest(conn, sess, activity)
+		close(hubDone)
+	}()
+
+	// Idle timeout watcher.
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+	go func() {
+		for {
+			select {
+			case <-destDone:
+				return
+			case <-hubDone:
+				return
+			case _, ok := <-activity:
+				if !ok {
+					return
+				}
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(idleTimeout)
+			}
+		}
+	}()
+
+	// Half-close.
 	select {
-	case <-pumpDone:
-	case <-time.After(200 * time.Millisecond):
+	case <-destDone:
+		sess.SendControl(mpframe.TypeClose, nil)
+		select {
+		case <-hubDone:
+		case <-time.After(5 * time.Second):
+		}
+	case <-hubDone:
+		sess.SendControl(mpframe.TypeClose, nil)
+		select {
+		case <-destDone:
+		case <-time.After(2 * time.Second):
+		}
+	case <-idleTimer.C:
+		fmt.Printf("session %x: idle timeout\n", func() []byte { id := sess.ID(); return id[:] }())
 	}
 	fmt.Printf("session %x: closed\n", func() []byte { id := sess.ID(); return id[:] }())
 }
 
-func (s *Server) pumpDestToHub(dest net.Conn, sess *mphub.Session) {
+func (s *Server) pumpDestToHub(dest net.Conn, sess *mphub.Session, activity chan<- struct{}) {
 	buf := make([]byte, s.cfg.WriteChunkSize)
 	for {
 		n, err := dest.Read(buf)
 		if n > 0 {
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
 			payload := make([]byte, n)
 			copy(payload, buf[:n])
 			if _, sent := sess.SendData(payload); sent == 0 {
@@ -182,7 +265,7 @@ func (s *Server) pumpDestToHub(dest net.Conn, sess *mphub.Session) {
 	}
 }
 
-func (s *Server) pumpHubToDest(dest net.Conn, sess *mphub.Session) {
+func (s *Server) pumpHubToDest(dest net.Conn, sess *mphub.Session, activity chan<- struct{}) {
 	for {
 		select {
 		case <-sess.Done():
@@ -193,6 +276,10 @@ func (s *Server) pumpHubToDest(dest net.Conn, sess *mphub.Session) {
 			}
 			switch fr.Type {
 			case mpframe.TypeData:
+				select {
+				case activity <- struct{}{}:
+				default:
+				}
 				ready, err := sess.DeliverData(fr)
 				if err != nil {
 					return
@@ -223,13 +310,34 @@ func (s *Server) sendAck(id mpframe.SessionID, errMsg string) error {
 	if errMsg != "" {
 		f.Payload = []byte(errMsg)
 	}
-	if hub.Broadcast(f) == 0 {
+	if hub.BroadcastAlways(f) == 0 {
 		return errors.New("no live tunnels")
 	}
 	return nil
 }
 
 const tombTTL = 30 * time.Second
+
+// tombSweepLoop periodically cleans expired entries from the tomb map
+// so it doesn't grow unbounded when traffic stops.
+func (s *Server) tombSweepLoop(ctx context.Context) {
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.tombMu.Lock()
+			for k, ts := range s.tombs {
+				if time.Since(ts) > tombTTL {
+					delete(s.tombs, k)
+				}
+			}
+			s.tombMu.Unlock()
+		}
+	}
+}
 
 func (s *Server) tomb(id mpframe.SessionID) {
 	s.tombMu.Lock()
@@ -255,3 +363,4 @@ func (s *Server) isTomb(id mpframe.SessionID) bool {
 	}
 	return true
 }
+

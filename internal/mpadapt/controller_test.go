@@ -20,13 +20,13 @@ import (
 	"testing"
 	"time"
 
-	"xrayrunner/internal/mpadapt"
-	"xrayrunner/internal/mpfront"
-	"xrayrunner/internal/mphub"
-	"xrayrunner/internal/mppool"
-	"xrayrunner/internal/mpserver"
-	"xrayrunner/internal/socks5"
-	"xrayrunner/internal/testutil"
+	"xplex/internal/mpadapt"
+	"xplex/internal/mpfront"
+	"xplex/internal/mphub"
+	"xplex/internal/mppool"
+	"xplex/internal/mpserver"
+	"xplex/internal/socks5"
+	"xplex/internal/testutil"
 )
 
 // settableXray exposes a knob to inject latency into a fake xray on
@@ -399,3 +399,4 @@ done:
 	// Explicitly cancel to tear down all tunnels before cleanup.
 	cancel()
 }
+

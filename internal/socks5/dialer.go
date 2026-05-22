@@ -111,3 +111,4 @@ func buildConnectRequest(host string, port uint16) ([]byte, error) {
 	req = append(req, []byte(host)...)
 	return append(req, portBytes...), nil
 }
+

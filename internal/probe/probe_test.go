@@ -1,15 +1,14 @@
 package probe_test
 
 import (
-	"crypto/tls"
 	"net"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"xrayrunner/internal/probe"
-	"xrayrunner/internal/testutil"
+	"xplex/internal/probe"
+	"xplex/internal/testutil"
 )
 
 func portFromAddr(t *testing.T, addr string) int {
@@ -25,19 +24,19 @@ func portFromAddr(t *testing.T, addr string) int {
 	return n
 }
 
-// tlsTerminator returns a SOCKS5 handler that wraps the tunnel in TLS so
-// the probe's TLS handshake actually completes.
-func tlsTerminator(t *testing.T, observe func(target string, port uint16)) func(string, uint16, net.Conn) {
-	cfg := testutil.SelfSignedTLSConfig(t)
+// httpResponder returns a SOCKS5 handler that accepts the connection and
+// sends back a minimal HTTP response (simulating 1.1.1.1:80).
+func httpResponder(observe func(target string, port uint16)) func(string, uint16, net.Conn) {
 	return func(target string, port uint16, conn net.Conn) {
 		if observe != nil {
 			observe(target, port)
 		}
-		tc := tls.Server(conn, cfg)
-		// We don't care about the result beyond completing the handshake;
-		// the probe closes its end immediately after.
-		_ = tc.Handshake()
-		_ = tc.Close()
+		// Read the request (we don't care about content).
+		buf := make([]byte, 512)
+		_, _ = conn.Read(buf)
+		// Send a minimal HTTP response.
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
+		_ = conn.Close()
 	}
 }
 
@@ -45,7 +44,7 @@ func TestRun_Success(t *testing.T) {
 	var sawHost string
 	var sawPort uint16
 	srv := &testutil.FakeSocks5{
-		Handler: tlsTerminator(t, func(h string, p uint16) {
+		Handler: httpResponder(func(h string, p uint16) {
 			sawHost, sawPort = h, p
 		}),
 	}
@@ -66,9 +65,9 @@ func TestRun_Success(t *testing.T) {
 	if r.Port != port {
 		t.Errorf("Result.Port mismatch: got %d, want %d", r.Port, port)
 	}
-	// The probe must drive a CONNECT to 1.1.1.1:443 through the tunnel.
-	if sawHost != "1.1.1.1" || sawPort != 443 {
-		t.Errorf("server saw (%q, %d), want (1.1.1.1, 443)", sawHost, sawPort)
+	// The probe must drive a CONNECT to 1.1.1.1:80 through the tunnel.
+	if sawHost != "1.1.1.1" || sawPort != 80 {
+		t.Errorf("server saw (%q, %d), want (1.1.1.1, 80)", sawHost, sawPort)
 	}
 }
 
@@ -108,11 +107,9 @@ func TestRun_ConnectRejected(t *testing.T) {
 	}
 }
 
-func TestRun_TLSFails(t *testing.T) {
-	// Tunnel succeeds but the upstream isn't TLS — closes the conn after
-	// SOCKS5 negotiation, so the probe's TLS handshake will fail. This
-	// proves the probe really is exercising the tunnel, not just timing
-	// the SOCKS5 reply.
+func TestRun_RemoteCloses(t *testing.T) {
+	// Tunnel succeeds but the upstream closes immediately — no HTTP
+	// response arrives. Probe should detect this as a failure.
 	srv := &testutil.FakeSocks5{
 		Handler: func(_ string, _ uint16, conn net.Conn) {
 			_ = conn.Close()
@@ -123,17 +120,17 @@ func TestRun_TLSFails(t *testing.T) {
 
 	r := probe.Run(portFromAddr(t, addr), 2*time.Second)
 	if r.OK {
-		t.Fatal("expected not OK when TLS handshake cannot complete")
+		t.Fatal("expected not OK when remote closes immediately")
 	}
-	if !strings.HasPrefix(r.Err, "tls:") {
-		t.Errorf("expected tls error, got %q", r.Err)
+	if !strings.Contains(r.Err, "read:") && !strings.Contains(r.Err, "write:") {
+		t.Errorf("expected read/write error, got %q", r.Err)
 	}
 }
 
 func TestRun_LatencyReflectsUpstreamDelay(t *testing.T) {
 	srv := &testutil.FakeSocks5{
 		GreetDelay: 200 * time.Millisecond,
-		Handler:    tlsTerminator(t, nil),
+		Handler:    httpResponder(nil),
 	}
 	addr, _ := srv.Start()
 	defer srv.Close()
@@ -146,3 +143,4 @@ func TestRun_LatencyReflectsUpstreamDelay(t *testing.T) {
 		t.Errorf("latency %v should be >= 200ms (upstream delay)", r.Latency)
 	}
 }
+

@@ -132,3 +132,4 @@ func nearestRank(sorted []time.Duration, p float64) time.Duration {
 	}
 	return sorted[idx]
 }
+

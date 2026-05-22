@@ -3,7 +3,7 @@ package testutil
 import (
 	"testing"
 
-	"xrayrunner/internal/mpcrypto"
+	"xplex/internal/mpcrypto"
 )
 
 // TestCodec returns a Codec built from a fixed all-zeros PSK. Tests
@@ -18,3 +18,4 @@ func TestCodec(t *testing.T) *mpcrypto.Codec {
 	}
 	return c
 }
+

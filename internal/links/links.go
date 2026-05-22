@@ -42,3 +42,4 @@ func Summarize(link string) string {
 	}
 	return fmt.Sprintf("%s://%s (%s)", u.Scheme, u.Host, tag)
 }
+

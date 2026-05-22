@@ -88,3 +88,4 @@ func TestSummarize_Malformed_ReturnsRaw(t *testing.T) {
 		t.Errorf("expected raw passthrough for malformed link, got %q", got)
 	}
 }
+

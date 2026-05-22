@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"xrayrunner/internal/mpdedup"
+	"xplex/internal/mpdedup"
 )
 
 func TestPushInOrderDelivers(t *testing.T) {
@@ -125,3 +125,4 @@ func TestConcurrentPush(t *testing.T) {
 		t.Errorf("after concurrent dups: next=%d, want %d", b.Next(), n+1)
 	}
 }
+

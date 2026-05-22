@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"xrayrunner/internal/mpframe"
+	"xplex/internal/mpframe"
 )
 
 func id(b byte) mpframe.SessionID {
@@ -146,3 +146,4 @@ func TestEncodeDestTooLong(t *testing.T) {
 		t.Fatal("expected error for oversized dest")
 	}
 }
+

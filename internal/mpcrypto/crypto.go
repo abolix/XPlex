@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -42,6 +43,15 @@ const Overhead = chacha20poly1305.Overhead // 16
 // MaxCipherFrame caps a single ciphertext frame so a malicious peer
 // cannot ask us to allocate gigabytes.
 const MaxCipherFrame = 1 << 24 // 16 MiB
+
+// readBufPool recycles read buffers to reduce GC pressure (#7).
+var readBufPool = sync.Pool{
+	New: func() any {
+		// Start with a 32KB buffer; will grow if needed.
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
 
 // Codec is a per-direction AEAD that encrypts whole-frame mpframe blobs.
 // Safe for use by one writer goroutine and one reader goroutine.
@@ -63,11 +73,9 @@ func New(key []byte) (*Codec, error) {
 
 // WriteFrame seals plaintext and writes one length-prefixed frame to w.
 //
-// nonce comes from crypto/rand: ChaCha20-Poly1305's 12-byte nonce
-// space is enough to make collisions astronomically unlikely
-// (2^48 frames between collisions at random). For our scale
-// (Stratum + browsing through one shared pool) we'll never come
-// close.
+// #6: Single write call — header (4 byte len + 12 byte nonce) and
+// ciphertext are combined into one buffer to avoid TCP small-segment
+// issues and reduce syscalls.
 func (c *Codec) WriteFrame(w io.Writer, plaintext []byte) error {
 	nonce := make([]byte, NonceSize)
 	if _, err := rand.Read(nonce); err != nil {
@@ -78,21 +86,19 @@ func (c *Codec) WriteFrame(w io.Writer, plaintext []byte) error {
 	if total > MaxCipherFrame {
 		return fmt.Errorf("frame too large: %d > %d", total, MaxCipherFrame)
 	}
-	hdr := make([]byte, 4+len(nonce))
-	binary.BigEndian.PutUint32(hdr[:4], uint32(total))
-	copy(hdr[4:], nonce)
-	if _, err := w.Write(hdr); err != nil {
-		return err
-	}
-	if _, err := w.Write(ct); err != nil {
-		return err
-	}
-	return nil
+	// Single combined write: [u32 len][nonce][ciphertext+tag]
+	buf := make([]byte, 4+total)
+	binary.BigEndian.PutUint32(buf[:4], uint32(total))
+	copy(buf[4:4+NonceSize], nonce)
+	copy(buf[4+NonceSize:], ct)
+	_, err := w.Write(buf)
+	return err
 }
 
 // ReadFrame reads one length-prefixed encrypted frame from r and
 // returns the decrypted plaintext.
 //
+// #7: Uses a buffer pool to reduce per-frame allocations.
 // Returns io.EOF if the stream ends cleanly between frames.
 func (c *Codec) ReadFrame(r io.Reader) ([]byte, error) {
 	var lenBuf [4]byte
@@ -106,15 +112,32 @@ func (c *Codec) ReadFrame(r io.Reader) ([]byte, error) {
 	if total > MaxCipherFrame {
 		return nil, fmt.Errorf("frame too large: %d > %d", total, MaxCipherFrame)
 	}
-	body := make([]byte, total)
+
+	// Get a buffer from the pool; grow if needed.
+	bp := readBufPool.Get().(*[]byte)
+	body := *bp
+	if cap(body) < total {
+		body = make([]byte, total)
+	} else {
+		body = body[:total]
+	}
+
 	if _, err := io.ReadFull(r, body); err != nil {
+		*bp = body
+		readBufPool.Put(bp)
 		return nil, err
 	}
 	nonce := body[:NonceSize]
 	ct := body[NonceSize:]
 	pt, err := c.aead.Open(nil, nonce, ct, nil)
+
+	// Return the buffer to the pool.
+	*bp = body
+	readBufPool.Put(bp)
+
 	if err != nil {
 		return nil, errors.New("authentication failed (psk mismatch or tamper)")
 	}
 	return pt, nil
 }
+

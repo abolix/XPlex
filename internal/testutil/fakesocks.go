@@ -167,3 +167,4 @@ func writeReply(c net.Conn, status byte) error {
 	_, err := c.Write([]byte{0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 	return err
 }
+

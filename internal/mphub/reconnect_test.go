@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"xrayrunner/internal/mpframe"
-	"xrayrunner/internal/mphub"
-	"xrayrunner/internal/mppool"
-	"xrayrunner/internal/testutil"
+	"xplex/internal/mpframe"
+	"xplex/internal/mphub"
+	"xplex/internal/mppool"
+	"xplex/internal/testutil"
 )
 
 // fakeXrayDialer returns a DialFunc that connects directly to the
@@ -49,8 +49,8 @@ func TestHub_KillsSessionsWhenPoolGoesDead(t *testing.T) {
 		t.Fatal("register")
 	}
 
-	// killAfter is 5s; allow extra slack for slow CI.
-	deadline := time.Now().Add(10 * time.Second)
+	// killAfter is 30s; allow extra slack for slow CI.
+	deadline := time.Now().Add(40 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case <-sess.Done():
@@ -58,7 +58,7 @@ func TestHub_KillsSessionsWhenPoolGoesDead(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	t.Fatal("session was not killed by liveness loop within 10s")
+	t.Fatal("session was not killed by liveness loop within 40s")
 }
 
 // TestHub_PoolRecoversAfterServerRestart proves the pool reconnects
@@ -171,3 +171,4 @@ func startToyMPServer(t *testing.T) (string, func()) {
 	}
 	return ln.Addr().String(), stopper
 }
+

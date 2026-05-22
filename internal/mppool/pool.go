@@ -16,6 +16,7 @@
 package mppool
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -23,8 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"xrayrunner/internal/mpcrypto"
-	"xrayrunner/internal/mpframe"
+	"xplex/internal/mpcrypto"
+	"xplex/internal/mpframe"
 )
 
 // DialFunc opens one tunnel.
@@ -85,7 +86,9 @@ func (t *Tunnel) Send(f mpframe.Frame) bool {
 	case t.sendCh <- f:
 		return true
 	default:
-		t.Close()
+		// #5: Buffer full — drop this frame instead of killing the tunnel.
+		// The dedup layer on the receiving end handles missing frames from
+		// one path as long as another path delivers them.
 		return false
 	}
 }
@@ -105,6 +108,8 @@ func (t *Tunnel) SendAlways(f mpframe.Frame) bool {
 	case t.sendCh <- f:
 		return true
 	default:
+		// Control frames are critical — if buffer is full, the tunnel is
+		// too congested. Kill it so pool reconnects fresh.
 		t.Close()
 		return false
 	}
@@ -194,19 +199,6 @@ func New(parent context.Context, cfg Config) *Pool {
 // InboundWithSrc returns frames paired with their source tunnel.
 func (p *Pool) InboundWithSrc() <-chan FrameWithSrc { return p.inboundWithSrc }
 
-// Inbound returns frames only (drops the src). Convenience for
-// consumers that don't care about source attribution.
-func (p *Pool) Inbound() <-chan mpframe.Frame {
-	out := make(chan mpframe.Frame, cap(p.inboundWithSrc))
-	go func() {
-		defer close(out)
-		for fs := range p.inboundWithSrc {
-			out <- fs.Frame
-		}
-	}()
-	return out
-}
-
 // Broadcast sends f through every ACTIVE tunnel. Returns the number
 // of tunnels that accepted f.
 func (p *Pool) Broadcast(f mpframe.Frame) int {
@@ -258,6 +250,9 @@ func (p *Pool) ActiveCount() int {
 
 // AddConn pushes an externally-accepted conn into the pool. Server side.
 func (p *Pool) AddConn(name string, conn net.Conn) {
+	// Enable TCP_NODELAY to minimize latency for small frames (shares).
+	setNoDelay(conn)
+
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -328,16 +323,26 @@ func (p *Pool) snapshotLocked() []*Tunnel {
 // hammer the network with dial attempts. Backoff resets to baseline
 // once a tunnel stays up for at least minStableUptime — that way a
 // brief flap doesn't cascade into a long backoff.
+//
+// Dead-link dampening: if a slot hasn't had a successful connection
+// for longer than deadLinkThreshold, we switch to a much slower retry
+// interval (deadLinkRetry) to stop wasting resources on links that
+// are probably offline. Once the link recovers, backoff resets to
+// normal immediately.
 func (p *Pool) maintainSlot(i int) {
 	defer p.wg.Done()
 	dial := p.dialFuncs[i]
 	name := p.dialerNames[i]
 
 	const (
-		minStableUptime = 30 * time.Second
-		maxBackoff      = 15 * time.Second
+		minStableUptime   = 30 * time.Second
+		maxBackoff        = 15 * time.Second
+		deadLinkThreshold = 10 * time.Minute
+		deadLinkRetry     = 5 * time.Minute
 	)
 	backoff := p.reconnectBackoff
+	lastUp := time.Now() // assume it was alive at startup
+
 	for {
 		if p.ctx.Err() != nil {
 			return
@@ -346,13 +351,18 @@ func (p *Pool) maintainSlot(i int) {
 		conn, err := dial(dialCtx)
 		cancel()
 		if err != nil {
+			// If the link has been dead for a long time, use slow retry.
+			effectiveBackoff := backoff
+			if time.Since(lastUp) > deadLinkThreshold {
+				effectiveBackoff = deadLinkRetry
+			}
 			fmt.Printf("pool slot %s: dial failed: %v (retry in %v)\n",
-				name, err, backoff)
+				name, err, effectiveBackoff)
 			select {
 			case <-p.ctx.Done():
 				return
-			case <-time.After(backoff):
-				// Exponential backoff up to maxBackoff.
+			case <-time.After(effectiveBackoff):
+				// Exponential backoff up to maxBackoff (for the normal phase).
 				backoff *= 2
 				if backoff > maxBackoff {
 					backoff = maxBackoff
@@ -366,6 +376,8 @@ func (p *Pool) maintainSlot(i int) {
 			sendCh: make(chan mpframe.Frame, sendBufferDepth),
 			done:   make(chan struct{}),
 		}
+		// Enable TCP_NODELAY on tunnel connections for low-latency mining.
+		setNoDelay(conn)
 		t.SetState(StateActive)
 		p.mu.Lock()
 		p.slotted[i] = t
@@ -382,6 +394,9 @@ func (p *Pool) maintainSlot(i int) {
 		}
 		p.mu.Unlock()
 		fmt.Printf("pool slot %s: tunnel down (uptime %v)\n", name, uptime.Round(time.Millisecond))
+
+		// The tunnel was up — update lastUp so we know this link is alive.
+		lastUp = time.Now()
 
 		// Reset backoff if the tunnel was actually stable.
 		if uptime >= minStableUptime {
@@ -404,11 +419,34 @@ func (p *Pool) maintainSlot(i int) {
 // runTunnel runs reader+writer goroutines and blocks until both exit.
 func (p *Pool) runTunnel(t *Tunnel) {
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3) // writer + reader + pinger
+
+	// #8: Buffered writer batches small frames into fewer TCP segments.
+	bw := bufio.NewWriterSize(t.conn, 32*1024)
+
+	// Keepalive pinger: sends a PING frame every 2s to keep the
+	// underlying xray/WebSocket connection warm and reduce jitter.
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-t.done:
+				return
+			case <-ticker.C:
+				ping := mpframe.Frame{Type: mpframe.TypePing}
+				if !t.SendAlways(ping) {
+					return
+				}
+			}
+		}
+	}()
 
 	go func() {
 		defer wg.Done()
 		for {
+			// Drain all queued frames, then flush once.
 			select {
 			case <-t.done:
 				return
@@ -418,7 +456,29 @@ func (p *Pool) runTunnel(t *Tunnel) {
 					t.Close()
 					return
 				}
-				if err := p.codec.WriteFrame(t.conn, blob); err != nil {
+				if err := p.codec.WriteFrame(bw, blob); err != nil {
+					t.Close()
+					return
+				}
+				// Drain any additional queued frames before flushing.
+			drain:
+				for {
+					select {
+					case f2 := <-t.sendCh:
+						blob2, err := mpframe.Marshal(f2)
+						if err != nil {
+							t.Close()
+							return
+						}
+						if err := p.codec.WriteFrame(bw, blob2); err != nil {
+							t.Close()
+							return
+						}
+					default:
+						break drain
+					}
+				}
+				if err := bw.Flush(); err != nil {
 					t.Close()
 					return
 				}
@@ -429,6 +489,8 @@ func (p *Pool) runTunnel(t *Tunnel) {
 	go func() {
 		defer wg.Done()
 		for {
+			// Read deadline: detect silently-dead tunnels within 90s.
+			_ = t.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 			pt, err := p.codec.ReadFrame(t.conn)
 			if err != nil {
 				t.Close()
@@ -438,6 +500,10 @@ func (p *Pool) runTunnel(t *Tunnel) {
 			if err != nil {
 				t.Close()
 				return
+			}
+			// Drop PING/PONG at the pool level — they're keepalive only.
+			if f.Type == mpframe.TypePing || f.Type == mpframe.TypePong {
+				continue
 			}
 			p.totalRecvd.Add(1)
 			select {
@@ -452,3 +518,13 @@ func (p *Pool) runTunnel(t *Tunnel) {
 
 	wg.Wait()
 }
+
+// setNoDelay enables TCP_NODELAY on a connection if it's a *net.TCPConn.
+// This disables Nagle's algorithm, reducing latency for small frames
+// (like Stratum share submissions) by up to 40ms.
+func setNoDelay(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+}
+

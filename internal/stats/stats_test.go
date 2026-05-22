@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"xrayrunner/internal/stats"
+	"xplex/internal/stats"
 )
 
 func ok(latencyMs int) stats.Sample {
@@ -184,3 +184,4 @@ func TestTracker_WindowZeroFallsBackToOne(t *testing.T) {
 		t.Errorf("window<=0 should clamp to 1, got total=%d", s.Total)
 	}
 }
+

@@ -21,8 +21,8 @@ import (
 	"sort"
 	"time"
 
-	"xrayrunner/internal/mphub"
-	"xrayrunner/internal/mppool"
+	"xplex/internal/mphub"
+	"xplex/internal/mppool"
 )
 
 // Config controls the controller.
@@ -51,7 +51,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		MinActive:           2,
-		MaxActive:           3,
+		MaxActive:           2,
 		Tick:                5 * time.Second,
 		DemoteThreshold:     0.05,
 		MinFrames:           50,
@@ -198,3 +198,4 @@ func bestShadowByWins(shadows []*mppool.Tunnel, wins map[*mppool.Tunnel]int64) *
 	}
 	return best
 }
+
