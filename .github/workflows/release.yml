@@ -108,11 +108,15 @@ jobs:
       - name: Compress (tar.gz for unix, zip for windows)
         run: |
           cd dist
+          # Copy example configs alongside the binary
+          cp ../xplex.config.client.example.json .
+          cp ../xplex.config.server.example.json .
+          cp ../xrays.example.txt .
           if [[ "${{ matrix.goos }}" == "windows" ]]; then
-            zip "${ASSET_NAME}.zip" "${ASSET_NAME}"
+            zip "${ASSET_NAME}.zip" "${ASSET_NAME}" xplex.config.client.example.json xplex.config.server.example.json xrays.example.txt
             echo "ARCHIVE=${ASSET_NAME}.zip" >> $GITHUB_ENV
           else
-            tar czf "${ASSET_NAME}.tar.gz" "${ASSET_NAME}"
+            tar czf "${ASSET_NAME}.tar.gz" "${ASSET_NAME}" xplex.config.client.example.json xplex.config.server.example.json xrays.example.txt
             echo "ARCHIVE=${ASSET_NAME}.tar.gz" >> $GITHUB_ENV
           fi
 

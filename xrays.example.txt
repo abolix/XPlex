@@ -1,0 +1,7 @@
+# One share link per line. Lines starting with # are ignored.
+# Supported: trojan://, vless://
+# Each link spawns one xray instance on a separate port.
+
+trojan://your-password@server1.example.com:443?security=tls&type=ws&host=cdn.example.com&path=/ws#Server1
+vless://your-uuid@server2.example.com:443?encryption=none&security=tls&type=ws&host=cdn2.example.com&path=/#Server2
+vless://your-uuid@server3.example.com:443?encryption=none&security=tls&type=ws&host=cdn3.example.com&path=/#Server3

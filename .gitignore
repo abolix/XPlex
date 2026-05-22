@@ -1,9 +1,9 @@
 # Build artifacts
 /dist/
 *.exe
-xplex
-loadtest
-bench
+/xplex
+/loadtest
+/bench
 
 # Generated xray configs (regenerated on every run from xrays.txt)
 /configs/
@@ -12,6 +12,7 @@ bench
 xrays.txt
 config.json
 prod.log
+!xrays.example.txt
 
 # Keep example configs committed
 !xplex.config.*.example.json
