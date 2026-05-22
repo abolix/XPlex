@@ -2,6 +2,8 @@
 
 Multipath proxy that bonds multiple xray tunnels into one reliable, low-latency SOCKS5 endpoint.
 
+> **For when you absolutely cannot afford a disconnect.** Crypto mining, important video calls, trading, remote work — anything where one dropped connection ruins your day. XPlex keeps your internet alive by sending your data through multiple paths at once. If one path dies, the others cover it instantly. The cost: 2-3x more bandwidth usage.
+
 Every byte you send is duplicated across N parallel xray paths. The fastest copy wins; the rest are dropped. If a path dies mid-stream, the others keep delivering — zero packet loss, zero reconnects visible to your application.
 
 ## How it works
