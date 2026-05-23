@@ -19,6 +19,38 @@ Every byte you send is duplicated across N parallel xray paths. The fastest copy
 - **Adaptive duplication**: a controller watches per-tunnel win rates and demotes slow tunnels to "shadow" (receive-only) to save bandwidth. Shadows get promoted back if conditions change.
 - **PSK encryption**: all traffic between client and server is encrypted with ChaCha20-Poly1305 using a pre-shared key. Xray operators cannot read or tamper with your data.
 
+## Prerequisites
+
+XPlex **client** needs [Xray-core](https://github.com/XTLS/Xray-core) to create the tunnels. The server does NOT need xray.
+
+### Install Xray-core (client only)
+
+1. Download the latest release from [github.com/XTLS/Xray-core/releases](https://github.com/XTLS/Xray-core/releases) for your platform.
+2. Extract it into a folder called `xray-core/` next to the `xplex` binary:
+
+```
+your-folder/
+├── xplex              (or xplex.exe on Windows)
+├── config.json
+├── xrays.txt
+└── xray-core/
+    ├── xray           (or xray.exe on Windows)
+    ├── geoip.dat
+    └── geosite.dat
+```
+
+XPlex looks for `xray-core/xray` (or `xray-core/xray.exe` on Windows) by default. If your xray binary is somewhere else, set `xrayBin` in your client config:
+
+```json
+{
+  "client": {
+    "xrayBin": "/usr/local/bin/xray"
+  }
+}
+```
+
+> **Note:** The server side (`xplex server`) does NOT need xray installed. It only receives tunnel connections and forwards traffic.
+
 ## Quick start
 
 ```bash
