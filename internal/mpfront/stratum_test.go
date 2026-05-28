@@ -301,6 +301,9 @@ func setupMPProxy(t *testing.T, ctx context.Context, tunnelCount int) (frontAddr
 // --- THE TESTS ---
 
 func TestStratumV1_SurvivesAggressiveTunnelFlaps(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running stratum test in short mode")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -397,6 +400,9 @@ func TestStratumV1_SurvivesAggressiveTunnelFlaps(t *testing.T) {
 }
 
 func TestStratumV2_SurvivesAggressiveTunnelFlaps(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running stratum test in short mode")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -476,4 +482,3 @@ func TestStratumV2_SurvivesAggressiveTunnelFlaps(t *testing.T) {
 		t.Errorf("SV2 pool saw %d disconnects — session interrupted", pool.disconnects.Load())
 	}
 }
-

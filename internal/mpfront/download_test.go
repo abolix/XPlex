@@ -266,6 +266,9 @@ func TestDownload_5MB_FastTunnels(t *testing.T) {
 // --- TEST 2: Large download with slow tunnels (simulates high latency) ---
 
 func TestDownload_5MB_SlowTunnels(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow tunnel test in short mode")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -373,6 +376,9 @@ func TestDownload_5MB_TunnelDeathMidTransfer(t *testing.T) {
 // The session must NOT hang — it should deliver what it can and close cleanly.
 
 func TestDownload_5MB_AllTunnelsDieBriefly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow tunnel-death test in short mode")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -591,6 +597,9 @@ func TestDownload_Bidirectional_SlowTunnels(t *testing.T) {
 // --- TEST 9: Adapt controller with very aggressive settings ---
 
 func TestDownload_AggressiveAdapt_SlowTunnels(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow tunnel test in short mode")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -629,6 +638,9 @@ func TestDownload_AggressiveAdapt_SlowTunnels(t *testing.T) {
 // while a slow download is in progress.
 
 func TestDownload_PeriodicMassTunnelDeath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow tunnel-death test in short mode")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
