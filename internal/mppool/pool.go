@@ -139,6 +139,12 @@ type Pool struct {
 
 	inboundWithSrc chan FrameWithSrc
 
+	// Orphan queue: frames rescued from dead tunnels that couldn't be
+	// re-sent immediately (no live tunnels at the time). Drained when
+	// a new tunnel comes up. Bounded to prevent unbounded growth.
+	orphanMu sync.Mutex
+	orphans  []mpframe.Frame
+
 	wg     sync.WaitGroup
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -271,10 +277,12 @@ func (p *Pool) AddConn(name string, conn net.Conn) {
 
 	fmt.Printf("pool: tunnel %s up (accepted)\n", name)
 	go func() {
+		p.drainOrphans(t)
 		p.runTunnel(t)
 		p.mu.Lock()
 		delete(p.accepted, t)
 		p.mu.Unlock()
+		p.rescueFrames(t)
 		fmt.Printf("pool: tunnel %s down (accepted)\n", name)
 	}()
 }
@@ -302,6 +310,59 @@ func (p *Pool) snapshot() []*Tunnel {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.snapshotLocked()
+}
+
+// rescueFrames drains unsent DATA frames from a dead tunnel's send
+// buffer and re-broadcasts them through other live tunnels. If no
+// tunnels are alive, frames go into the orphan queue to be sent when
+// a tunnel recovers. Zero cost in the normal path; only runs on
+// tunnel death.
+func (p *Pool) rescueFrames(dead *Tunnel) {
+	const maxOrphans = 4096 // cap to prevent unbounded memory growth
+	for {
+		select {
+		case f := <-dead.sendCh:
+			if f.Type != mpframe.TypeData {
+				continue // drop PINGs and other control frames
+			}
+			// Try live tunnels first.
+			if p.Broadcast(f) > 0 {
+				continue
+			}
+			// No live tunnels — queue as orphan for later.
+			p.orphanMu.Lock()
+			if len(p.orphans) < maxOrphans {
+				p.orphans = append(p.orphans, f)
+			}
+			p.orphanMu.Unlock()
+		default:
+			return
+		}
+	}
+}
+
+// drainOrphans sends any queued orphan frames through the given tunnel.
+// Called when a new tunnel comes up to flush frames that were rescued
+// from dead tunnels but had nowhere to go at the time.
+func (p *Pool) drainOrphans(t *Tunnel) {
+	p.orphanMu.Lock()
+	if len(p.orphans) == 0 {
+		p.orphanMu.Unlock()
+		return
+	}
+	frames := p.orphans
+	p.orphans = nil
+	p.orphanMu.Unlock()
+
+	for i, f := range frames {
+		if !t.Send(f) {
+			// Tunnel already full or dead — put unsent frames back.
+			p.orphanMu.Lock()
+			p.orphans = append(frames[i:], p.orphans...)
+			p.orphanMu.Unlock()
+			return
+		}
+	}
 }
 
 func (p *Pool) snapshotLocked() []*Tunnel {
@@ -385,6 +446,7 @@ func (p *Pool) maintainSlot(i int) {
 
 		fmt.Printf("pool slot %s: tunnel up\n", name)
 		upStart := time.Now()
+		p.drainOrphans(t)
 		p.runTunnel(t)
 		uptime := time.Since(upStart)
 
@@ -393,6 +455,7 @@ func (p *Pool) maintainSlot(i int) {
 			p.slotted[i] = nil
 		}
 		p.mu.Unlock()
+		p.rescueFrames(t)
 		fmt.Printf("pool slot %s: tunnel down (uptime %v)\n", name, uptime.Round(time.Millisecond))
 
 		// The tunnel was up — update lastUp so we know this link is alive.
@@ -527,4 +590,3 @@ func setNoDelay(conn net.Conn) {
 		_ = tc.SetNoDelay(true)
 	}
 }
-

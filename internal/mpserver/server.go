@@ -290,6 +290,12 @@ func (s *Server) pumpHubToDest(dest net.Conn, sess *mphub.Session, activity chan
 					}
 				}
 			case mpframe.TypeClose:
+				// Flush any buffered out-of-order data before closing.
+				for _, p := range sess.FlushDedup() {
+					if _, werr := dest.Write(p); werr != nil {
+						return
+					}
+				}
 				return
 			}
 		}
@@ -363,4 +369,3 @@ func (s *Server) isTomb(id mpframe.SessionID) bool {
 	}
 	return true
 }
-

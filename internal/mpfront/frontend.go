@@ -208,6 +208,14 @@ func (f *Frontend) pumpHubToClient(client net.Conn, sess *mphub.Session) {
 				}
 				// Success ACK — ignore, we're already pumping.
 			case mpframe.TypeClose:
+				// Flush any buffered out-of-order data before closing.
+				// Frames may have been lost during tunnel death; deliver
+				// what we have rather than discarding it.
+				for _, p := range sess.FlushDedup() {
+					if _, werr := client.Write(p); werr != nil {
+						return
+					}
+				}
 				return
 			}
 		}
@@ -294,4 +302,3 @@ func writeConnectReply(c net.Conn, status byte) error {
 	_, err := c.Write([]byte{0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 	return err
 }
-

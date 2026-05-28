@@ -378,6 +378,17 @@ func (s *Session) DeliverData(f mpframe.Frame) ([][]byte, error) {
 	return out, err
 }
 
+// FlushDedup forces delivery of all pending frames in the dedup buffer
+// regardless of gaps. Used when a CLOSE is received and we want to
+// deliver whatever data we have before ending the session.
+func (s *Session) FlushDedup() [][]byte {
+	out := s.dedup.Flush()
+	for _, p := range out {
+		s.bytesRecv.Add(int64(len(p)))
+	}
+	return out
+}
+
 // Close marks the session closed.
 func (s *Session) Close() {
 	s.mu.Lock()
@@ -431,4 +442,3 @@ func (s *Session) feed(f mpframe.Frame) {
 	case <-s.doneCh:
 	}
 }
-
